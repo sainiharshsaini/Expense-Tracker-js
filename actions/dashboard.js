@@ -2,40 +2,59 @@
 
 import { db } from "@/lib/prisma";
 import { auth } from "@clerk/nextjs/server";
+import { revalidatePath } from "next/cache";
+
+const serializeTransaction = (obj) => {
+    const serialized = { ...obj };
+
+    if (obj.balance) {
+        serialized.balance = obj.balance.toNumber();
+    }
+}
 
 export async function createAccount(data) {
     try {
-        const {userId } = await auth();
-        if (!userId) {
-            throw new Error("unauthorized");
-        }
+        const { userId } = await auth();
+        if (!userId) throw new Error("unauthorized");
 
         const user = await db.user.findUnique({
-            where: {
-                clerkUserId: userId
-            }
+            where: { clerkUserId: userId }
         })
 
-        if (!user) {
-            throw new Error("User not found");
-        }
+        if (!user) throw new Error("User not found");
 
-        // convert balance to float before saving
-        const balanceFloat = parseFloat(data.balance);
+        const balanceFloat = parseFloat(data.balance);  // convert balance to float before saving
 
-        if (isNaN(balanceFloat)) {
-            throw new Error("Invalid balance amount");
-        }
+        if (isNaN(balanceFloat)) throw new Error("Invalid balance amount");
 
-        // check if this is the user's first account
-        const existingAccounts = await db.account.findMany({
-            where: {
-                userId: user.id
-            }
+        const existingAccounts = await db.account.findMany({  // check if this is the user's first account
+            where: { userId: user.id }
         })
 
-        const shouldBeDafault = existingAccounts.length === 0? true : data.isDefault; 
+        const shouldBeDefault = existingAccounts.length === 0 ? true : data.isDefault;
+
+        if (shouldBeDefault) { // If the account should be default, unset other default accounts
+            await db.account.updateMany({
+                where: { userId: user.id, isDefault: true },
+                data: { isDefault: false }
+            })
+        }
+
+        const account = await db.account.create({
+            data: {
+                ...data,
+                balance: balanceFloat,
+                userId: user.id,
+                isDefault: shouldBeDefault
+            }
+        });
+
+        // nextjs doesn't support decimals value
+        const serializedAccount = serializeTransaction(account);
+
+        revalidatePath("/dashboard"); // it help to re-fetch the value of this page
+        return { success: true, data: serializedAccount };
     } catch (error) {
-        
+        throw new Error(error.message);
     }
 }
